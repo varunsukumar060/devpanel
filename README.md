@@ -5,95 +5,101 @@
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)
 ![Platform](https://img.shields.io/badge/Platform-Linux-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
+![Phase](https://img.shields.io/badge/Phase-2%20%E2%80%94%20Config%20System-brightgreen)
 
 ---
 
 ## Features
 
-| Tab | Feature | Description |
-|-----|---------|-------------|
-| `[1] HUD` | System HUD | Live CPU, RAM, disk, WiFi, serial ports, git status |
-| `[2] Repos` | Git Monitor | Scans all project dirs for git repos — branch, dirty state, last commit |
-| `[3] Thermal` | Thermal Manager | CPU/GPU temps, fan RPM, power profile switcher |
-| `[4] Memory` | Memory Inspector | RAM map, top processes, swap, zombie cleaner |
-| `[5] Boot` | Boot Optimizer | systemd-analyze blame, slowest services breakdown |
-| `[6] Workspace` | Workspace Launcher | USB device detection, ESP32/Arduino profile matching, project quick-access |
+| Tab | Key | Description |
+|-----|-----|-------------|
+| HUD | `1` | Live CPU, RAM, disk, WiFi, serial ports, git status of CWD |
+| Repos | `2` | Scans all project dirs for git repos — branch, dirty state, last commit |
+| Thermal | `3` | CPU/GPU temps, fan RPM, power profile switcher |
+| Memory | `4` | RAM map, top processes, swap, zombie cleaner |
+| Boot | `5` | systemd-analyze blame, slowest services breakdown |
+| Workspace | `6` | USB device detection, ESP32/Arduino profile matching, project quick-access |
+| **Config** | `7` | **Live view + edit of `~/.devpanel/config.toml`** |
 
 ---
 
 ## Installation
 
-### Prerequisites
-- Python 3.8+
-- Linux (tested on Linux Mint XFCE)
-
-### Quick Install
-
 ```bash
 git clone https://github.com/varunsukumar060/devpanel.git
 cd devpanel
 bash install.sh
+bash run.sh
 ```
 
-### Manual Install
-
-```bash
-git clone https://github.com/varunsukumar060/devpanel.git
-cd devpanel
-pip3 install --user textual psutil
-python3 devpanel.py
-```
-
----
-
-## Usage
-
-```bash
-python3 devpanel.py
-```
-
-### Keyboard Shortcuts
-
-| Key | Action |
-|-----|--------|
-| `1` | Switch to HUD tab |
-| `2` | Switch to Repos tab |
-| `3` | Switch to Thermal tab |
-| `4` | Switch to Memory tab |
-| `5` | Switch to Boot tab |
-| `6` | Switch to Workspace tab |
-| `r` | Refresh all tabs |
-| `q` | Quit |
+On first launch, devpanel auto-creates `~/.devpanel/config.toml` with smart defaults for your system.
 
 ---
 
 ## Configuration
 
-Edit the config block at the top of `devpanel.py`:
+All settings live in **`~/.devpanel/config.toml`** — auto-generated on first run.
 
-```python
-# Path to your projects folder
-PROJECTS_DIR = Path("/home/varun_sukumar/Project")
+```toml
+[general]
+title = "devpanel — Linux Dev Companion"
+hud_refresh   = 3    # seconds
+repos_refresh = 10
+stats_refresh = 4
 
-# Additional directories to scan for git repos
-DEV_DIRS = [PROJECTS_DIR, Path.home() / "Documents", Path.home() / "Desktop"]
+[paths]
+projects_dir   = "~/Projects"           # auto-detected on first run
+extra_scan_dirs = ["~/Documents", "~/Desktop"]
 
-# USB device profiles: vendor:product → (label, [commands])
-WORKSPACE_PROFILES = {
-    "10c4:ea60": ("ESP32 (CP2102)",  ["code", "python3 -m serial.tools.miniterm"]),
-    "1a86:7523": ("Arduino (CH340)", ["arduino-ide"]),
-    "0403:6001": ("FTDI Device",     ["code"]),
-}
+[workspace.profiles]
+# "vendor:product" = ["label", "cmd1", "cmd2"]
+"10c4:ea60" = ["ESP32 (CP2102)", "code", "python3 -m serial.tools.miniterm"]
+"1a86:7523" = ["Arduino (CH340)", "arduino-ide"]
+
+[thermal]
+warn_temp = 60
+crit_temp = 80
+```
+
+Edit via **Tab 7 (Config)** inside devpanel, or directly:
+```bash
+nano ~/.devpanel/config.toml
+```
+
+---
+
+## Keyboard Shortcuts
+
+| Key | Action |
+|-----|--------|
+| `1`–`7` | Switch tabs |
+| `r` | Refresh all tabs |
+| `q` | Quit |
+
+---
+
+## Power Profile Buttons (Thermal Tab)
+
+CPU governor control requires root access. To use without typing sudo each time:
+
+```bash
+# Option 1: Run devpanel as root
+sudo bash run.sh
+
+# Option 2: Passwordless sudoers rule (recommended)
+sudo visudo -f /etc/sudoers.d/devpanel-cpufreq
+# Add this line:
+# YOUR_USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 ```
 
 ---
 
 ## Roadmap
 
-- [x] Phase 1 — Core 6-tab TUI (Linux Mint, single machine)
-- [ ] Phase 2 — `~/.devpanel/config.toml` for user config
+- [x] Phase 1 — Core 6-tab TUI
+- [x] Phase 2 — `~/.devpanel/config.toml` + Config Viewer tab
 - [ ] Phase 3 — Distro-agnostic, `pipx` installable
-- [ ] Phase 4 — Plugin system for custom tabs
+- [ ] Phase 4 — Screenshots, GitHub release `v1.0.0`
 - [ ] Phase 5 — Publish to PyPI
 
 ---
@@ -107,4 +113,4 @@ Electronics & Communication Engineering | Embedded Systems | Linux
 
 ## License
 
-MIT License — free to use, modify, and distribute.
+MIT — free to use, modify, and distribute.
