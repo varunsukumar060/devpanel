@@ -1,10 +1,10 @@
 [build-system]
 requires = ["setuptools>=68", "wheel"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "devpanel"
-version = "0.3.0"
+version = "1.0.0"
 description = "Lightweight terminal TUI dev companion for Linux — system stats, git monitor, thermal manager, memory inspector, boot optimizer & workspace launcher."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -13,7 +13,7 @@ authors = [
 ]
 keywords = ["linux", "tui", "terminal", "devtools", "sysinfo", "git", "embedded", "iot"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
