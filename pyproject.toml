@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "devpanel-tui"
-version = "1.0.0"
+version = "1.0.1"
 description = "Lightweight terminal TUI dev companion for Linux — system stats, git monitor, thermal manager, memory inspector, boot optimizer & workspace launcher."
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Varun Sukumar K", email = "varunsukumar060@gmail.com" }
 ]
@@ -16,7 +17,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
