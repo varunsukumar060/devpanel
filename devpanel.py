@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
 devpanel — Lightweight Linux Dev Companion TUI
-Phase 3: pipx-installable, distro-agnostic
+Phase 6: Network & Connectivity Tab
 Author: Varun Sukumar K (@varunsukumar060)
 """
 
-__version__ = "0.3.0"
+__version__ = "1.1.0-dev"
 __author__  = "Varun Sukumar K"
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, TabbedContent, TabPane, Static, Button
+from textual.widgets import Header, Footer, TabbedContent, TabPane, Static, Button, Input
 from textual.reactive import reactive
 
 import psutil
@@ -19,6 +19,7 @@ import sys
 import glob
 import shutil
 import platform
+import time
 from pathlib import Path
 from datetime import datetime
 
@@ -27,11 +28,6 @@ from datetime import datetime
 # ─────────────────────────────────────────────────────────────────────────────
 
 def detect_distro() -> dict:
-    """
-    Returns distro info dict with keys:
-      name, id, id_like, version, pkg_manager, terminal
-    Works on any Linux distro via /etc/os-release.
-    """
     info = {"name": "Linux", "id": "", "id_like": "", "version": "",
             "pkg_manager": "unknown", "terminal": "xterm"}
     try:
@@ -48,8 +44,6 @@ def detect_distro() -> dict:
                     info["version"] = line.split("=", 1)[1].strip('"')
     except Exception:
         pass
-
-    # Package manager detection
     family = info["id"] + " " + info["id_like"]
     if any(x in family for x in ["ubuntu", "debian", "mint", "pop", "elementary", "kali", "linuxmint"]):
         info["pkg_manager"] = "apt"
@@ -59,24 +53,16 @@ def detect_distro() -> dict:
         info["pkg_manager"] = "dnf"
     elif any(x in family for x in ["opensuse", "suse"]):
         info["pkg_manager"] = "zypper"
-    elif shutil.which("apt"):
-        info["pkg_manager"] = "apt"
-    elif shutil.which("pacman"):
-        info["pkg_manager"] = "pacman"
-    elif shutil.which("dnf"):
-        info["pkg_manager"] = "dnf"
-
-    # Terminal emulator preference
+    elif shutil.which("apt"):    info["pkg_manager"] = "apt"
+    elif shutil.which("pacman"): info["pkg_manager"] = "pacman"
+    elif shutil.which("dnf"):    info["pkg_manager"] = "dnf"
     for t in ["xfce4-terminal", "gnome-terminal", "konsole", "xterm", "kitty", "alacritty", "tilix"]:
         if shutil.which(t):
             info["terminal"] = t
             break
-
     return info
 
-
 DISTRO = detect_distro()
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG SYSTEM
@@ -102,6 +88,9 @@ extra_scan_dirs = [
     "~/Desktop",
 ]
 
+[network]
+ping_hosts = ["8.8.8.8", "1.1.1.1", "google.com"]
+
 [workspace]
 [workspace.profiles]
 "10c4:ea60" = ["ESP32 (CP2102)",  "code",  "python3 -m serial.tools.miniterm"]
@@ -115,7 +104,6 @@ warn_temp = 60
 crit_temp = 80
 """
 
-
 def _detect_projects_dir() -> str:
     for candidate in ["Project", "Projects", "projects", "dev", "code", "workspace",
                       "Documents/Projects", "Documents/projects"]:
@@ -124,12 +112,10 @@ def _detect_projects_dir() -> str:
             return str(p)
     return str(Path.home() / "Projects")
 
-
 def ensure_config() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not CONFIG_FILE.exists():
         CONFIG_FILE.write_text(DEFAULT_CONFIG.format(projects_dir=_detect_projects_dir()))
-
 
 def _parse_toml_simple(text: str) -> dict:
     import re
@@ -166,7 +152,6 @@ def _parse_toml_simple(text: str) -> dict:
         node[key] = parsed
     return result
 
-
 def load_config() -> dict:
     ensure_config()
     try:
@@ -183,7 +168,6 @@ def load_config() -> dict:
         pass
     return _parse_toml_simple(CONFIG_FILE.read_text())
 
-
 def cfg_get(cfg: dict, *keys, default=None):
     node = cfg
     for k in keys:
@@ -194,8 +178,6 @@ def cfg_get(cfg: dict, *keys, default=None):
             return default
     return node
 
-
-# ─── Load config (cached for session) ─────────────────────────────────────────────
 CFG = load_config()
 
 PROJECTS_DIR  = Path(os.path.expanduser(cfg_get(CFG, "paths", "projects_dir", default=str(Path.home() / "Projects"))))
@@ -207,6 +189,9 @@ STATS_REFRESH = int(cfg_get(CFG, "general", "stats_refresh",  default=4))
 APP_TITLE     = cfg_get(CFG, "general", "title", default="devpanel — Linux Dev Companion")
 WARN_TEMP     = int(cfg_get(CFG, "thermal", "warn_temp", default=60))
 CRIT_TEMP     = int(cfg_get(CFG, "thermal", "crit_temp", default=80))
+PING_HOSTS    = cfg_get(CFG, "network", "ping_hosts", default=["8.8.8.8", "1.1.1.1", "google.com"])
+if not isinstance(PING_HOSTS, list):
+    PING_HOSTS = ["8.8.8.8", "1.1.1.1", "google.com"]
 
 _profiles_raw = cfg_get(CFG, "workspace", "profiles", default={})
 WORKSPACE_PROFILES: dict = {}
@@ -219,7 +204,6 @@ if not WORKSPACE_PROFILES:
         "1a86:7523": ("Arduino (CH340)", ["arduino-ide"]),
         "0403:6001": ("FTDI Device",     ["code"]),
     }
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -251,7 +235,7 @@ def set_governor_direct(gov: str) -> tuple:
     elif ok_count > 0:
         return True, f"✔ Governor → [bold]{gov}[/] on {ok_count}/{cpu_count} CPUs"
     elif last_err == "permission":
-        return False, "[yellow]⚠ Permission denied — relaunch with: [bold]sudo devpanel[/] or [bold]sudo bash run.sh[/][/]"
+        return False, "[yellow]⚠ Permission denied — add sudoers rule for cpufreq[/]"
     elif last_err == "not_found":
         return False, "[yellow]⚠ cpufreq not available on this CPU[/]"
     else:
@@ -348,6 +332,123 @@ def bar(val, max_val, width=20, fill="█", empty="░") -> str:
 def temp_color(t: float) -> str:
     return "green" if t < WARN_TEMP else ("yellow" if t < CRIT_TEMP else "red")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# NETWORK HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+_net_prev: dict = {}
+_net_prev_time: float = 0.0
+
+def get_net_speed() -> dict:
+    """Returns per-interface bytes/sec upload and download since last call."""
+    global _net_prev, _net_prev_time
+    now   = time.monotonic()
+    stats = psutil.net_io_counters(pernic=True)
+    speed = {}
+    dt    = now - _net_prev_time if _net_prev_time else 1.0
+    for iface, s in stats.items():
+        prev = _net_prev.get(iface)
+        if prev and dt > 0:
+            tx = max(0, s.bytes_sent - prev.bytes_sent) / dt
+            rx = max(0, s.bytes_recv - prev.bytes_recv) / dt
+        else:
+            tx, rx = 0.0, 0.0
+        speed[iface] = {"tx": tx, "rx": rx,
+                        "tx_total": s.bytes_sent, "rx_total": s.bytes_recv,
+                        "errin": s.errin, "errout": s.errout,
+                        "dropin": s.dropin, "dropout": s.dropout}
+    _net_prev      = stats
+    _net_prev_time = now
+    return speed
+
+def fmt_speed(bps: float) -> str:
+    """Format bytes/sec → human readable."""
+    if bps >= 1024 ** 2:
+        return f"{bps / 1024**2:.1f} MB/s"
+    elif bps >= 1024:
+        return f"{bps / 1024:.1f} KB/s"
+    return f"{bps:.0f} B/s"
+
+def fmt_bytes(b: int) -> str:
+    if b >= 1024 ** 3:
+        return f"{b / 1024**3:.2f} GB"
+    elif b >= 1024 ** 2:
+        return f"{b / 1024**2:.1f} MB"
+    elif b >= 1024:
+        return f"{b / 1024:.1f} KB"
+    return f"{b} B"
+
+def get_active_connections(limit: int = 12) -> list:
+    """Returns list of active TCP ESTABLISHED connections."""
+    conns = []
+    try:
+        for c in psutil.net_connections(kind="tcp"):
+            if c.status == "ESTABLISHED" and c.raddr:
+                try:
+                    name = psutil.Process(c.pid).name() if c.pid else "?"
+                except Exception:
+                    name = "?"
+                conns.append({
+                    "laddr": f"{c.laddr.ip}:{c.laddr.port}",
+                    "raddr": f"{c.raddr.ip}:{c.raddr.port}",
+                    "pid":   c.pid or 0,
+                    "name":  name,
+                })
+    except Exception:
+        pass
+    return conns[:limit]
+
+def get_open_ports(limit: int = 10) -> list:
+    """Returns listening TCP/UDP ports."""
+    ports = []
+    seen  = set()
+    try:
+        for c in psutil.net_connections(kind="inet"):
+            if c.status in ("LISTEN", "") and c.laddr:
+                key = (c.laddr.port, c.type)
+                if key not in seen:
+                    seen.add(key)
+                    try:
+                        name = psutil.Process(c.pid).name() if c.pid else "system"
+                    except Exception:
+                        name = "system"
+                    proto = "TCP" if c.type == 1 else "UDP"
+                    ports.append({"port": c.laddr.port, "proto": proto, "name": name})
+    except Exception:
+        pass
+    return sorted(ports, key=lambda x: x["port"])[:limit]
+
+def ping_host(host: str) -> str:
+    """Ping a host once, return latency string or 'timeout'."""
+    try:
+        out = subprocess.check_output(
+            ["ping", "-c", "1", "-W", "1", host],
+            stderr=subprocess.DEVNULL, text=True, timeout=2
+        )
+        for line in out.splitlines():
+            if "time=" in line:
+                ms = line.split("time=")[1].split()[0]
+                return f"{float(ms):.1f} ms"
+        return "ok"
+    except Exception:
+        return "timeout"
+
+def get_wifi_info() -> dict:
+    """Returns SSID, signal strength, frequency via iwconfig/iw."""
+    info = {"ssid": "", "signal": "", "freq": "", "iface": ""}
+    for iface in run("ls /sys/class/net").split():
+        if iface.startswith(("w", "wl")):
+            info["iface"] = iface
+            info["ssid"]  = run(f"iwgetid {iface} -r") or ""
+            iw = run(f"iw dev {iface} link 2>/dev/null")
+            for line in iw.splitlines():
+                line = line.strip()
+                if "signal:" in line:
+                    info["signal"] = line.split("signal:")[1].strip()
+                elif "freq:" in line:
+                    info["freq"] = line.split("freq:")[1].strip() + " MHz"
+            break
+    return info
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
@@ -389,7 +490,6 @@ class HUDTab(Static):
             dirty = " [yellow][dirty][/]" if git["dirty"] else " [green][clean][/]"
             ahead = f" [cyan]↑{git['ahead']}[/]" if git["ahead"] else ""
             git_str = f"\n  Branch : [bold]{git['branch']}[/]{dirty}{ahead}\n  Last   : {git['last']}"
-
         self.query_one("#hud-body", Static).update(
             f"[bold cyan]╔══ SYSTEM HUD ═════════════════════════════════════╗[/]\n"
             f"[bold cyan]║[/] {datetime.now().strftime('%H:%M:%S')}  Uptime: {uptime}  As: {as_str}  "
@@ -446,7 +546,7 @@ class ThermalTab(Static):
         yield Static("\n[bold]── Power Profiles ────────────────────────────[/]")
         yield Static(id="profile-info")
         yield Static(f"  [dim]Thresholds: warn={WARN_TEMP}°C  crit={CRIT_TEMP}°C  (edit ~/.devpanel/config.toml)[/]\n"
-                     "  [dim]cpufreq needs root — run: sudo devpanel  or  sudo bash run.sh[/]")
+                     "  [dim]For cpufreq: add sudoers rule — see README[/]")
         yield Button("⚡ Performance", id="btn-perf",  variant="warning")
         yield Button("⚖  Balanced",    id="btn-bal",   variant="primary")
         yield Button("🔋 Power Save",   id="btn-save",  variant="success")
@@ -636,6 +736,123 @@ class WorkspaceTab(Static):
             self.refresh_ws()
 
 
+class NetworkTab(Static):
+    """Phase 6 — Network & Connectivity Tab."""
+
+    _ping_results: dict = {}
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="net-body")
+        yield Static(id="net-ping-status")
+        yield Button("📡 Ping Hosts",   id="btn-ping",    variant="primary")
+        yield Button("🔄 Refresh",       id="btn-net-ref", variant="success")
+
+    def on_mount(self) -> None:
+        self.refresh_net()
+        self.set_interval(STATS_REFRESH, self.refresh_net)
+
+    def refresh_net(self) -> None:
+        speeds   = get_net_speed()
+        conns    = get_active_connections(12)
+        ports    = get_open_ports(10)
+        wifi     = get_wifi_info()
+
+        lines = [
+            "[bold cyan]╔══ NETWORK & CONNECTIVITY ══════════════════════╗[/]",
+            "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
+        ]
+
+        # WiFi info
+        if wifi["ssid"]:
+            sig_col = "green"
+            try:
+                sig_val = int(wifi["signal"].split()[0])
+                sig_col = "green" if sig_val >= -60 else ("yellow" if sig_val >= -75 else "red")
+            except Exception:
+                pass
+            lines += [
+                "[bold]── WiFi ──────────────────────────────────────[/]",
+                f"  Interface : [cyan]{wifi['iface']}[/]",
+                f"  SSID      : [bold]{wifi['ssid']}[/]",
+                f"  Signal    : [{sig_col}]{wifi['signal']}[/]",
+                f"  Frequency : {wifi['freq']}",
+                "",
+            ]
+        else:
+            lines += ["[bold]── WiFi ──────────────────────────────────────[/]",
+                      "  [dim]No wireless interface detected[/]", ""]
+
+        # Per-interface bandwidth
+        lines.append("[bold]── Live Bandwidth (per interface) ────────────[/]")
+        lines.append(f"  {'Interface':<14} {'↑ Upload':>12}  {'↓ Download':>12}  {'TX Total':>10}  {'RX Total':>10}")
+        lines.append("  " + "─" * 66)
+        for iface, s in speeds.items():
+            if s["tx_total"] == 0 and s["rx_total"] == 0:
+                continue
+            tx_col = "yellow" if s["tx"] > 512*1024 else "green"
+            rx_col = "yellow" if s["rx"] > 512*1024 else "cyan"
+            err_str = f"  [red]errs:{s['errin']+s['errout']}[/]" if s["errin"] + s["errout"] > 0 else ""
+            lines.append(
+                f"  {iface:<14} [{tx_col}]{fmt_speed(s['tx']):>12}[/]  [{rx_col}]{fmt_speed(s['rx']):>12}[/]  "
+                f"{fmt_bytes(s['tx_total']):>10}  {fmt_bytes(s['rx_total']):>10}{err_str}"
+            )
+        lines.append("")
+
+        # Active connections
+        lines += [
+            "[bold]── Active TCP Connections ────────────────────[/]",
+            f"  {'Process':<18} {'Local':>22}  {'Remote':>22}  PID",
+            "  " + "─" * 68,
+        ]
+        if conns:
+            for c in conns:
+                lines.append(f"  {c['name'][:18]:<18} {c['laddr']:>22}  {c['raddr']:>22}  {c['pid']}")
+        else:
+            lines.append("  [dim]No established connections (or needs root for full list)[/]")
+        lines.append("")
+
+        # Open/listening ports
+        lines += [
+            "[bold]── Listening Ports ───────────────────────────[/]",
+            f"  {'Port':<8} {'Proto':<6} Process",
+            "  " + "─" * 36,
+        ]
+        if ports:
+            for p in ports:
+                lines.append(f"  {p['port']:<8} {p['proto']:<6} {p['name']}")
+        else:
+            lines.append("  [dim]No listening ports found[/]")
+        lines.append("")
+
+        # Ping results (cached from last run)
+        if self._ping_results:
+            lines.append("[bold]── Ping Results ──────────────────────────────[/]")
+            for host, latency in self._ping_results.items():
+                col = "green" if "ms" in latency else "red"
+                lines.append(f"  {host:<28} [{col}]{latency}[/]")
+        else:
+            lines.append("[dim]  Press 📡 Ping Hosts to test connectivity[/]")
+
+        self.query_one("#net-body", Static).update("\n".join(lines))
+
+    def _do_ping(self) -> None:
+        status = self.query_one("#net-ping-status", Static)
+        status.update("  [dim]Pinging...[/]")
+        results = {}
+        for host in PING_HOSTS:
+            results[host] = ping_host(host)
+        self._ping_results = results
+        status.update("  [green]✔ Ping complete[/]")
+        self.refresh_net()
+        self.set_timer(3, lambda: status.update(""))
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-ping":
+            self._do_ping()
+        elif event.button.id == "btn-net-ref":
+            self.refresh_net()
+
+
 class ConfigTab(Static):
     def compose(self) -> ComposeResult:
         yield Static(id="cfg-body")
@@ -705,7 +922,8 @@ class DevPanel(App):
         ("4", "switch_tab('memory')",    "Memory"),
         ("5", "switch_tab('boot')",      "Boot"),
         ("6", "switch_tab('workspace')", "Workspace"),
-        ("7", "switch_tab('config')",    "Config"),
+        ("7", "switch_tab('network')",   "Network"),
+        ("8", "switch_tab('config')",    "Config"),
         ("r", "refresh_all",             "Refresh"),
     ]
 
@@ -718,7 +936,8 @@ class DevPanel(App):
             with TabPane("[4] Memory",    id="memory"):    yield MemoryTab()
             with TabPane("[5] Boot",      id="boot"):      yield BootTab()
             with TabPane("[6] Workspace", id="workspace"): yield WorkspaceTab()
-            with TabPane("[7] Config",    id="config"):    yield ConfigTab()
+            with TabPane("[7] Network",   id="network"):   yield NetworkTab()
+            with TabPane("[8] Config",    id="config"):    yield ConfigTab()
         yield Footer()
 
     def action_switch_tab(self, tab_id: str) -> None:
@@ -728,7 +947,8 @@ class DevPanel(App):
         refresh_map = {
             HUDTab: "refresh_hud", ReposTab: "refresh_repos",
             ThermalTab: "refresh_thermal", MemoryTab: "refresh_mem",
-            BootTab: "refresh_boot", WorkspaceTab: "refresh_ws", ConfigTab: "refresh_cfg",
+            BootTab: "refresh_boot", WorkspaceTab: "refresh_ws",
+            NetworkTab: "refresh_net", ConfigTab: "refresh_cfg",
         }
         for cls, method in refresh_map.items():
             try:
