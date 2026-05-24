@@ -6,6 +6,33 @@
 ![Platform](https://img.shields.io/badge/Platform-Linux-orange)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)
+![PyPI](https://img.shields.io/pypi/v/devpanel-tui)
+
+---
+
+## Install
+
+### Recommended (pipx)
+```bash
+pipx install devpanel-tui
+devpanel
+```
+
+### Via pip
+```bash
+pip install devpanel-tui
+devpanel
+```
+
+### From source
+```bash
+git clone https://github.com/varunsukumar060/devpanel.git
+cd devpanel
+bash install.sh
+bash run.sh
+```
+
+> On first launch, `~/.devpanel/config.toml` is auto-created with smart defaults for your system.
 
 ---
 
@@ -39,18 +66,7 @@
 
 ---
 
-## Quick Install (any Linux distro)
-
-```bash
-git clone https://github.com/varunsukumar060/devpanel.git
-cd devpanel
-bash install.sh
-bash run.sh
-```
-
-> On first launch, `~/.devpanel/config.toml` is auto-created with smart defaults for your system.
-
-### Supported Distros
+## Supported Distros
 
 | Distro Family | Tested |
 |---|---|
@@ -101,12 +117,12 @@ crit_temp = 80
 ## Power Profiles (Thermal Tab)
 
 ```bash
-# Option 1: run as root
-sudo bash run.sh
-
-# Option 2: passwordless sudoers rule (recommended)
+# Recommended — passwordless sudoers rule for cpufreq only
 sudo visudo -f /etc/sudoers.d/devpanel-cpufreq
 # Add: YOUR_USERNAME ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
+
+# Alternative — run with full path
+sudo ~/.local/bin/devpanel
 ```
 
 ---
@@ -117,7 +133,7 @@ sudo visudo -f /etc/sudoers.d/devpanel-cpufreq
 - [x] Phase 2 — `~/.devpanel/config.toml` auto-generation + Config tab
 - [x] Phase 3 — Distro-agnostic (apt/pacman/dnf/zypper), `pyproject.toml`, pipx-ready
 - [x] Phase 4 — `v1.0.0` GitHub release with screenshots
-- [ ] Phase 5 — Publish to PyPI (`pip install devpanel`)
+- [x] Phase 5 — Published to PyPI (`pipx install devpanel-tui`)
 
 ---
 
