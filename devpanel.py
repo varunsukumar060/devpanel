@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 devpanel — Lightweight Linux Dev Companion TUI
-Phase 6: Network & Connectivity Tab
+Phase 7: Serial Monitor Tab (flagship)
 Author: Varun Sukumar K (@varunsukumar060)
 """
 
-__version__ = "1.1.0-dev"
+__version__ = "1.2.0-dev"
 __author__  = "Varun Sukumar K"
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, TabbedContent, TabPane, Static, Button, Input
+from textual.widgets import Header, Footer, TabbedContent, TabPane, Static, Button, Input, Select
 from textual.reactive import reactive
+from textual.message import Message
 
 import psutil
 import subprocess
@@ -20,8 +21,21 @@ import glob
 import shutil
 import platform
 import time
+import threading
+import csv
+import collections
 from pathlib import Path
 from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERIAL AVAILABILITY CHECK
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    import serial
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except ImportError:
+    SERIAL_AVAILABLE = False
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DISTRO DETECTION
@@ -90,6 +104,15 @@ extra_scan_dirs = [
 
 [network]
 ping_hosts = ["8.8.8.8", "1.1.1.1", "google.com"]
+
+[serial]
+default_baud   = 115200
+buffer_lines   = 200
+auto_scroll    = true
+graph_enabled  = true
+graph_width    = 40
+graph_key      = ""
+export_dir     = "~/.devpanel"
 
 [workspace]
 [workspace.profiles]
@@ -193,6 +216,14 @@ PING_HOSTS    = cfg_get(CFG, "network", "ping_hosts", default=["8.8.8.8", "1.1.1
 if not isinstance(PING_HOSTS, list):
     PING_HOSTS = ["8.8.8.8", "1.1.1.1", "google.com"]
 
+# Serial config
+SERIAL_DEFAULT_BAUD  = int(cfg_get(CFG, "serial", "default_baud",  default=115200))
+SERIAL_BUFFER_LINES  = int(cfg_get(CFG, "serial", "buffer_lines",  default=200))
+SERIAL_GRAPH_ENABLED = bool(cfg_get(CFG, "serial", "graph_enabled", default=True))
+SERIAL_GRAPH_WIDTH   = int(cfg_get(CFG, "serial", "graph_width",   default=40))
+SERIAL_GRAPH_KEY     = cfg_get(CFG, "serial", "graph_key",         default="") or ""
+SERIAL_EXPORT_DIR    = Path(os.path.expanduser(cfg_get(CFG, "serial", "export_dir", default="~/.devpanel")))
+
 _profiles_raw = cfg_get(CFG, "workspace", "profiles", default={})
 WORKSPACE_PROFILES: dict = {}
 for vid_pid, items in (_profiles_raw.items() if isinstance(_profiles_raw, dict) else {}.items()):
@@ -204,6 +235,8 @@ if not WORKSPACE_PROFILES:
         "1a86:7523": ("Arduino (CH340)", ["arduino-ide"]),
         "0403:6001": ("FTDI Device",     ["code"]),
     }
+
+BAUD_RATES = [1200, 2400, 4800, 9600, 14400, 19200, 38400, 57600, 115200, 230400, 460800, 921600]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS
@@ -242,8 +275,20 @@ def set_governor_direct(gov: str) -> tuple:
         return False, f"[red]✖ {last_err}[/]"
 
 def get_serial_ports() -> list:
+    if SERIAL_AVAILABLE:
+        return [p.device for p in serial.tools.list_ports.comports()] or []
     ports = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
-    return sorted(ports) if ports else ["None detected"]
+    return sorted(ports)
+
+def get_serial_ports_info() -> list:
+    """Returns rich port info list with description and hwid."""
+    if not SERIAL_AVAILABLE:
+        raw = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
+        return [{"device": p, "description": "Unknown", "hwid": ""} for p in sorted(raw)]
+    return [
+        {"device": p.device, "description": p.description or "Unknown", "hwid": p.hwid or ""}
+        for p in serial.tools.list_ports.comports()
+    ]
 
 def get_git_status(path: Path) -> dict:
     if not (path / ".git").exists():
@@ -340,7 +385,6 @@ _net_prev: dict = {}
 _net_prev_time: float = 0.0
 
 def get_net_speed() -> dict:
-    """Returns per-interface bytes/sec upload and download since last call."""
     global _net_prev, _net_prev_time
     now   = time.monotonic()
     stats = psutil.net_io_counters(pernic=True)
@@ -362,7 +406,6 @@ def get_net_speed() -> dict:
     return speed
 
 def fmt_speed(bps: float) -> str:
-    """Format bytes/sec → human readable."""
     if bps >= 1024 ** 2:
         return f"{bps / 1024**2:.1f} MB/s"
     elif bps >= 1024:
@@ -379,7 +422,6 @@ def fmt_bytes(b: int) -> str:
     return f"{b} B"
 
 def get_active_connections(limit: int = 12) -> list:
-    """Returns list of active TCP ESTABLISHED connections."""
     conns = []
     try:
         for c in psutil.net_connections(kind="tcp"):
@@ -399,7 +441,6 @@ def get_active_connections(limit: int = 12) -> list:
     return conns[:limit]
 
 def get_open_ports(limit: int = 10) -> list:
-    """Returns listening TCP/UDP ports."""
     ports = []
     seen  = set()
     try:
@@ -419,7 +460,6 @@ def get_open_ports(limit: int = 10) -> list:
     return sorted(ports, key=lambda x: x["port"])[:limit]
 
 def ping_host(host: str) -> str:
-    """Ping a host once, return latency string or 'timeout'."""
     try:
         out = subprocess.check_output(
             ["ping", "-c", "1", "-W", "1", host],
@@ -434,7 +474,6 @@ def ping_host(host: str) -> str:
         return "timeout"
 
 def get_wifi_info() -> dict:
-    """Returns SSID, signal strength, frequency via iwconfig/iw."""
     info = {"ssid": "", "signal": "", "freq": "", "iface": ""}
     for iface in run("ls /sys/class/net").split():
         if iface.startswith(("w", "wl")):
@@ -449,6 +488,152 @@ def get_wifi_info() -> dict:
                     info["freq"] = line.split("freq:")[1].strip() + " MHz"
             break
     return info
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERIAL MONITOR ENGINE
+# ─────────────────────────────────────────────────────────────────────────────
+
+SPARKLINE_CHARS = " ▁▂▃▄▅▆▇█"
+
+def sparkline(values: list, width: int = 40) -> str:
+    """Render a mini ASCII sparkline from a list of floats."""
+    if not values:
+        return "─" * width
+    data = list(values)[-width:]
+    lo, hi = min(data), max(data)
+    span = hi - lo if hi != lo else 1.0
+    chars = []
+    for v in data:
+        idx = int(((v - lo) / span) * (len(SPARKLINE_CHARS) - 1))
+        chars.append(SPARKLINE_CHARS[idx])
+    # Pad left if shorter than width
+    return " " * (width - len(chars)) + "".join(chars)
+
+def parse_numeric(line: str, key: str = "") -> float | None:
+    """
+    Try to extract a numeric value from a serial line.
+    Supports formats:
+      - bare float/int:    "123.45"
+      - key:value pairs:   "ecg:512"  "temp: 36.5"
+      - CSV first column:  "512,34,18"
+      - Arduino plot:      "value:512"
+    """
+    import re
+    line = line.strip()
+    if key:
+        # Look for key:value or key=value
+        m = re.search(rf"{re.escape(key)}\s*[:=]\s*(-?[\d.]+)", line, re.IGNORECASE)
+        if m:
+            try:
+                return float(m.group(1))
+            except Exception:
+                pass
+        return None
+    # Bare number
+    try:
+        return float(line.split(",")[0].split()[0])
+    except Exception:
+        pass
+    # Any number in line
+    nums = re.findall(r"-?[\d]+\.?[\d]*", line)
+    if nums:
+        try:
+            return float(nums[0])
+        except Exception:
+            pass
+    return None
+
+
+class SerialReader:
+    """
+    Background-thread serial reader.
+    Fills a deque with (timestamp, raw_line) tuples.
+    Thread-safe: append to deque, read from main thread.
+    """
+
+    def __init__(self, port: str, baud: int, buffer: int = 200):
+        self.port    = port
+        self.baud    = baud
+        self.lines: collections.deque = collections.deque(maxlen=buffer)
+        self.graph_values: collections.deque = collections.deque(maxlen=SERIAL_GRAPH_WIDTH * 3)
+        self.running = False
+        self._thread: threading.Thread | None = None
+        self._ser    = None
+        self.error   = ""
+        self.rx_count = 0
+        self.connected = False
+
+    def start(self) -> bool:
+        if not SERIAL_AVAILABLE:
+            self.error = "pyserial not installed — run: pip install pyserial"
+            return False
+        try:
+            self._ser = serial.Serial(self.port, self.baud, timeout=1)
+            self.running   = True
+            self.connected = True
+            self.error     = ""
+            self._thread   = threading.Thread(target=self._read_loop, daemon=True)
+            self._thread.start()
+            return True
+        except Exception as e:
+            self.error     = str(e)
+            self.connected = False
+            return False
+
+    def stop(self) -> None:
+        self.running   = False
+        self.connected = False
+        try:
+            if self._ser and self._ser.is_open:
+                self._ser.close()
+        except Exception:
+            pass
+
+    def send(self, text: str) -> bool:
+        try:
+            if self._ser and self._ser.is_open:
+                self._ser.write((text + "\n").encode("utf-8", errors="replace"))
+                self.lines.append((datetime.now(), f"[TX] {text}"))
+                return True
+        except Exception as e:
+            self.error = str(e)
+        return False
+
+    def _read_loop(self) -> None:
+        while self.running:
+            try:
+                if self._ser and self._ser.in_waiting:
+                    raw = self._ser.readline()
+                    try:
+                        line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                    except Exception:
+                        line = repr(raw)
+                    ts = datetime.now()
+                    self.lines.append((ts, line))
+                    self.rx_count += 1
+                    # Try to parse a plottable value
+                    val = parse_numeric(line, SERIAL_GRAPH_KEY)
+                    if val is not None:
+                        self.graph_values.append(val)
+                else:
+                    time.sleep(0.01)
+            except Exception as e:
+                self.error   = str(e)
+                self.running = False
+                self.connected = False
+                break
+
+    def export_csv(self, path: Path) -> int:
+        """Dump current buffer to CSV. Returns number of rows written."""
+        rows = list(self.lines)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["timestamp", "data"])
+            for ts, line in rows:
+                w.writerow([ts.strftime("%Y-%m-%d %H:%M:%S.%f"), line])
+        return len(rows)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TABS
@@ -471,7 +656,7 @@ class HUDTab(Static):
         uptime_s = int(datetime.now().timestamp() - psutil.boot_time())
         uptime   = f"{uptime_s//3600}h {(uptime_s%3600)//60}m"
         wifi     = run("iwgetid -r") or "Not connected"
-        ports    = get_serial_ports()
+        ports    = get_serial_ports() or ["None detected"]
         cwd      = Path.cwd()
         git      = get_git_status(cwd)
         temps    = get_thermal()
@@ -707,9 +892,9 @@ class WorkspaceTab(Static):
             tag = f"  [green]→ {matched[0]}[/]" if matched else ""
             lines.append(f"  [cyan]{d['id']}[/]  {d['name']}{tag}")
         lines.append("\n[bold]── Serial Ports ──────────────────────────────[/]")
-        for p in ports:
+        for p in (ports or ["None detected"]):
             lines.append(f"  [yellow]{p}[/]")
-        lines.append("\n[bold]── Matched Profiles ────────────────────────────────[/]")
+        lines.append("\n[bold]── Matched Profiles ─────────────────────────[/]")
         matched_any = False
         for d in devices:
             profile = WORKSPACE_PROFILES.get(d["id"])
@@ -721,7 +906,7 @@ class WorkspaceTab(Static):
                     lines.append(f"    [cyan]$ {cmd}[/]")
         if not matched_any:
             lines.append(f"  [dim]No known boards detected. Add profiles in {CONFIG_FILE}[/]")
-        lines.append("\n[bold]── Projects ────────────────────────────────────────[/]")
+        lines.append("\n[bold]── Projects ──────────────────────────────────[/]")
         if PROJECTS_DIR.exists():
             for d in sorted(d for d in PROJECTS_DIR.iterdir() if d.is_dir() and not d.name.startswith("."))[:12]:
                 git = get_git_status(d)
@@ -737,8 +922,6 @@ class WorkspaceTab(Static):
 
 
 class NetworkTab(Static):
-    """Phase 6 — Network & Connectivity Tab."""
-
     _ping_results: dict = {}
 
     def compose(self) -> ComposeResult:
@@ -752,17 +935,14 @@ class NetworkTab(Static):
         self.set_interval(STATS_REFRESH, self.refresh_net)
 
     def refresh_net(self) -> None:
-        speeds   = get_net_speed()
-        conns    = get_active_connections(12)
-        ports    = get_open_ports(10)
-        wifi     = get_wifi_info()
-
-        lines = [
+        speeds = get_net_speed()
+        conns  = get_active_connections(12)
+        ports  = get_open_ports(10)
+        wifi   = get_wifi_info()
+        lines  = [
             "[bold cyan]╔══ NETWORK & CONNECTIVITY ══════════════════════╗[/]",
             "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
         ]
-
-        # WiFi info
         if wifi["ssid"]:
             sig_col = "green"
             try:
@@ -775,14 +955,11 @@ class NetworkTab(Static):
                 f"  Interface : [cyan]{wifi['iface']}[/]",
                 f"  SSID      : [bold]{wifi['ssid']}[/]",
                 f"  Signal    : [{sig_col}]{wifi['signal']}[/]",
-                f"  Frequency : {wifi['freq']}",
-                "",
+                f"  Frequency : {wifi['freq']}", "",
             ]
         else:
             lines += ["[bold]── WiFi ──────────────────────────────────────[/]",
                       "  [dim]No wireless interface detected[/]", ""]
-
-        # Per-interface bandwidth
         lines.append("[bold]── Live Bandwidth (per interface) ────────────[/]")
         lines.append(f"  {'Interface':<14} {'↑ Upload':>12}  {'↓ Download':>12}  {'TX Total':>10}  {'RX Total':>10}")
         lines.append("  " + "─" * 66)
@@ -796,10 +973,8 @@ class NetworkTab(Static):
                 f"  {iface:<14} [{tx_col}]{fmt_speed(s['tx']):>12}[/]  [{rx_col}]{fmt_speed(s['rx']):>12}[/]  "
                 f"{fmt_bytes(s['tx_total']):>10}  {fmt_bytes(s['rx_total']):>10}{err_str}"
             )
-        lines.append("")
-
-        # Active connections
         lines += [
+            "",
             "[bold]── Active TCP Connections ────────────────────[/]",
             f"  {'Process':<18} {'Local':>22}  {'Remote':>22}  PID",
             "  " + "─" * 68,
@@ -809,10 +984,8 @@ class NetworkTab(Static):
                 lines.append(f"  {c['name'][:18]:<18} {c['laddr']:>22}  {c['raddr']:>22}  {c['pid']}")
         else:
             lines.append("  [dim]No established connections (or needs root for full list)[/]")
-        lines.append("")
-
-        # Open/listening ports
         lines += [
+            "",
             "[bold]── Listening Ports ───────────────────────────[/]",
             f"  {'Port':<8} {'Proto':<6} Process",
             "  " + "─" * 36,
@@ -823,8 +996,6 @@ class NetworkTab(Static):
         else:
             lines.append("  [dim]No listening ports found[/]")
         lines.append("")
-
-        # Ping results (cached from last run)
         if self._ping_results:
             lines.append("[bold]── Ping Results ──────────────────────────────[/]")
             for host, latency in self._ping_results.items():
@@ -832,7 +1003,6 @@ class NetworkTab(Static):
                 lines.append(f"  {host:<28} [{col}]{latency}[/]")
         else:
             lines.append("[dim]  Press 📡 Ping Hosts to test connectivity[/]")
-
         self.query_one("#net-body", Static).update("\n".join(lines))
 
     def _do_ping(self) -> None:
@@ -851,6 +1021,254 @@ class NetworkTab(Static):
             self._do_ping()
         elif event.button.id == "btn-net-ref":
             self.refresh_net()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SERIAL MONITOR TAB  (Phase 7 — Flagship)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class SerialTab(Static):
+    """
+    Phase 7 Serial Monitor:
+    • Auto-detect ports
+    • Port / baud selector
+    • Live scrolling terminal (ring buffer)
+    • Inline ASCII sparkline graph
+    • Send commands
+    • CSV export
+    """
+
+    _reader: SerialReader | None = None
+    _selected_port: str = ""
+    _selected_baud: int = SERIAL_DEFAULT_BAUD
+    _graph_on: bool = SERIAL_GRAPH_ENABLED
+    _last_export: str = ""
+
+    def compose(self) -> ComposeResult:
+        yield Static(id="ser-header")
+        # Port + baud selectors
+        yield Static("\n  [bold]── Port & Baud ──────────────────────────────────[/]")
+        yield Select(
+            options=self._port_options(),
+            id="sel-port",
+            prompt="Select serial port…",
+        )
+        yield Select(
+            options=[(str(b), str(b)) for b in BAUD_RATES],
+            id="sel-baud",
+            value=str(SERIAL_DEFAULT_BAUD),
+            prompt="Select baud rate…",
+        )
+        # Action buttons
+        yield Static("")
+        yield Button("▶ Connect",      id="btn-connect",  variant="success")
+        yield Button("■ Disconnect",   id="btn-disconnect", variant="error")
+        yield Button("🔄 Scan Ports",  id="btn-scan",     variant="primary")
+        yield Button("📊 Toggle Graph", id="btn-graph",    variant="warning")
+        yield Button("💾 Export CSV",  id="btn-export",   variant="default")
+        yield Button("🗑 Clear",       id="btn-clear",    variant="default")
+        # Status line
+        yield Static(id="ser-status")
+        # Graph area
+        yield Static(id="ser-graph")
+        # Terminal output
+        yield Static("\n  [bold]── Serial Terminal ──────────────────────────────[/]")
+        yield Static(id="ser-terminal")
+        # Send command
+        yield Static("\n  [bold]── Send Command ─────────────────────────────────[/]")
+        yield Input(placeholder="Type command → Enter to send", id="inp-send")
+
+    def _port_options(self) -> list:
+        infos = get_serial_ports_info()
+        if not infos:
+            return [("No ports detected", "")]
+        return [(f"{p['device']}  ({p['description']})", p['device']) for p in infos]
+
+    def on_mount(self) -> None:
+        self._refresh_header()
+        self.set_interval(1.0, self._tick)
+
+    def _tick(self) -> None:
+        """Called every second — update terminal + graph if connected."""
+        if self._reader and self._reader.connected:
+            self._render_terminal()
+            if self._graph_on:
+                self._render_graph()
+        elif self._reader and self._reader.error:
+            self.query_one("#ser-status", Static).update(
+                f"  [red]✖ Error: {self._reader.error}[/]"
+            )
+
+    def _refresh_header(self) -> None:
+        ports_info = get_serial_ports_info()
+        if not ports_info:
+            port_list = "  [yellow]No serial ports detected. Connect a device and press 🔄 Scan.[/]"
+        else:
+            port_list = "  " + "  ".join(
+                f"[cyan]{p['device']}[/] [dim]({p['description']})[/]" for p in ports_info
+            )
+        pyserial_tag = (
+            "[green]✔ pyserial available[/]"
+            if SERIAL_AVAILABLE
+            else "[red]✖ pyserial missing — run: pip install pyserial[/]"
+        )
+        self.query_one("#ser-header", Static).update(
+            f"[bold cyan]╔══ SERIAL MONITOR ══════════════════════════════╗[/]\n"
+            f"[bold cyan]║[/] Phase 7 Flagship  •  devpanel v{__version__}  •  {pyserial_tag}\n"
+            f"[bold cyan]╚════════════════════════════════════════════════╝[/]\n"
+            f"\n  [bold]Detected ports:[/]\n{port_list}\n"
+            f"  [dim]Graph key: '{SERIAL_GRAPH_KEY or 'auto'}' — set [serial] graph_key in config.toml[/]"
+        )
+
+    def _render_terminal(self) -> None:
+        if not self._reader:
+            return
+        lines = list(self._reader.lines)
+        # Show last 30 lines in terminal pane
+        visible = lines[-30:] if len(lines) > 30 else lines
+        rendered = []
+        for ts, raw in visible:
+            time_str = ts.strftime("%H:%M:%S.%f")[:-3]
+            # Color TX lines differently
+            if raw.startswith("[TX]"):
+                rendered.append(f"  [dim]{time_str}[/]  [yellow]{raw}[/]")
+            else:
+                rendered.append(f"  [dim]{time_str}[/]  {raw}")
+        total = self._reader.rx_count
+        rendered.insert(0, f"  [dim]Buffer: {len(lines)}/{SERIAL_BUFFER_LINES}  RX total: {total}[/]")
+        self.query_one("#ser-terminal", Static).update("\n".join(rendered))
+
+    def _render_graph(self) -> None:
+        if not self._reader or not self._reader.graph_values:
+            self.query_one("#ser-graph", Static).update(
+                "  [dim]── Sparkline Graph ─ waiting for numeric data…[/]"
+            )
+            return
+        vals = list(self._reader.graph_values)
+        spark = sparkline(vals, SERIAL_GRAPH_WIDTH)
+        lo, hi = min(vals), max(vals)
+        last   = vals[-1]
+        # Color by recency — brighter = recent
+        key_label = f" key=[cyan]{SERIAL_GRAPH_KEY}[/]" if SERIAL_GRAPH_KEY else ""
+        self.query_one("#ser-graph", Static).update(
+            f"\n  [bold]── Sparkline Graph{key_label} ──────────────────────────[/]\n"
+            f"  [dim]{hi:>8.2f}[/]  [green]{spark}[/]\n"
+            f"  [dim]{lo:>8.2f}[/]  last=[bold cyan]{last:.4g}[/]  "
+            f"samples={len(vals)}  range=[{lo:.4g}, {hi:.4g}]"
+        )
+
+    # ── Button handling ────────────────────────────────────────────────────
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+
+        if bid == "btn-connect":
+            self._do_connect()
+        elif bid == "btn-disconnect":
+            self._do_disconnect()
+        elif bid == "btn-scan":
+            self._do_scan()
+        elif bid == "btn-graph":
+            self._graph_on = not self._graph_on
+            self.query_one("#ser-graph", Static).update(
+                "  [dim]Graph disabled[/]" if not self._graph_on else ""
+            )
+        elif bid == "btn-export":
+            self._do_export()
+        elif bid == "btn-clear":
+            if self._reader:
+                self._reader.lines.clear()
+                self._reader.graph_values.clear()
+            self.query_one("#ser-terminal", Static).update("  [dim]Cleared.[/]")
+            self.query_one("#ser-graph", Static).update("")
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id == "inp-send":
+            cmd = event.value.strip()
+            if not cmd:
+                return
+            if not self._reader or not self._reader.connected:
+                self.query_one("#ser-status", Static).update(
+                    "  [red]Not connected — connect first[/]"
+                )
+                return
+            ok = self._reader.send(cmd)
+            event.input.value = ""
+            status = self.query_one("#ser-status", Static)
+            if ok:
+                status.update(f"  [green]✔ Sent: {cmd}[/]")
+            else:
+                status.update(f"  [red]✖ Send failed: {self._reader.error}[/]")
+            self.set_timer(2, lambda: status.update(""))
+
+    def on_select_changed(self, event: Select.Changed) -> None:
+        if event.select.id == "sel-port":
+            self._selected_port = str(event.value) if event.value else ""
+        elif event.select.id == "sel-baud":
+            try:
+                self._selected_baud = int(event.value)
+            except Exception:
+                self._selected_baud = SERIAL_DEFAULT_BAUD
+
+    # ── Actions ────────────────────────────────────────────────────────────
+
+    def _do_connect(self) -> None:
+        status = self.query_one("#ser-status", Static)
+        port = self._selected_port
+        if not port:
+            # Try first available port
+            ports = get_serial_ports()
+            port = ports[0] if ports else ""
+        if not port:
+            status.update("  [red]No port selected and none detected[/]")
+            return
+        if self._reader and self._reader.connected:
+            self._reader.stop()
+        self._reader = SerialReader(port, self._selected_baud, SERIAL_BUFFER_LINES)
+        status.update(f"  [dim]Connecting to {port} @ {self._selected_baud}…[/]")
+        ok = self._reader.start()
+        if ok:
+            status.update(
+                f"  [green]✔ Connected: {port} @ {self._selected_baud} baud[/]"
+            )
+        else:
+            status.update(
+                f"  [red]✖ Failed: {self._reader.error}[/]\n"
+                f"  [dim]Tip: sudo usermod -aG dialout $USER  then re-login[/]"
+            )
+
+    def _do_disconnect(self) -> None:
+        if self._reader:
+            self._reader.stop()
+            self.query_one("#ser-status", Static).update("  [yellow]Disconnected[/]")
+        else:
+            self.query_one("#ser-status", Static).update("  [dim]Not connected[/]")
+
+    def _do_scan(self) -> None:
+        self._refresh_header()
+        infos = get_serial_ports_info()
+        # Rebuild port selector options
+        sel = self.query_one("#sel-port", Select)
+        new_opts = self._port_options()
+        sel.set_options(new_opts)
+        status = self.query_one("#ser-status", Static)
+        status.update(f"  [green]✔ Found {len(infos)} port(s)[/]")
+        self.set_timer(2, lambda: status.update(""))
+
+    def _do_export(self) -> None:
+        status = self.query_one("#ser-status", Static)
+        if not self._reader or not list(self._reader.lines):
+            status.update("  [yellow]Nothing to export — no data captured[/]")
+            return
+        SERIAL_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        port_safe = (self._reader.port or "unknown").replace("/", "_")
+        fname     = f"serial_{port_safe}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        fpath     = SERIAL_EXPORT_DIR / fname
+        n = self._reader.export_csv(fpath)
+        self._last_export = str(fpath)
+        status.update(
+            f"  [green]✔ Exported {n} rows → {fpath}[/]"
+        )
 
 
 class ConfigTab(Static):
@@ -873,12 +1291,15 @@ class ConfigTab(Static):
             "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
         ]
         for line in content.splitlines():
-            if line.startswith("#"):     lines.append(f"[dim]{line}[/]")
-            elif line.startswith("["): lines.append(f"[bold yellow]{line}[/]")
+            if line.startswith("#"):
+                lines.append(f"[dim]{line}[/]")
+            elif line.startswith("["):
+                lines.append(f"[bold yellow]{line}[/]")
             elif "=" in line:
                 k, _, v = line.partition("=")
                 lines.append(f"  [cyan]{k.rstrip()}[/] =[green]{v}[/]")
-            else:                         lines.append(line)
+            else:
+                lines.append(line)
         self.query_one("#cfg-body", Static).update("\n".join(lines))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -912,6 +1333,8 @@ class DevPanel(App):
     TabbedContent { height: 1fr; }
     TabPane { overflow-y: auto; padding: 0; }
     Button { margin: 0 1 1 2; }
+    Select { margin: 0 2 0 2; width: 50; }
+    Input  { margin: 0 2 1 2; }
     """
     TITLE = APP_TITLE
     BINDINGS = [
@@ -923,7 +1346,8 @@ class DevPanel(App):
         ("5", "switch_tab('boot')",      "Boot"),
         ("6", "switch_tab('workspace')", "Workspace"),
         ("7", "switch_tab('network')",   "Network"),
-        ("8", "switch_tab('config')",    "Config"),
+        ("8", "switch_tab('serial')",    "Serial"),
+        ("9", "switch_tab('config')",    "Config"),
         ("r", "refresh_all",             "Refresh"),
     ]
 
@@ -937,7 +1361,8 @@ class DevPanel(App):
             with TabPane("[5] Boot",      id="boot"):      yield BootTab()
             with TabPane("[6] Workspace", id="workspace"): yield WorkspaceTab()
             with TabPane("[7] Network",   id="network"):   yield NetworkTab()
-            with TabPane("[8] Config",    id="config"):    yield ConfigTab()
+            with TabPane("[8] Serial",    id="serial"):    yield SerialTab()
+            with TabPane("[9] Config",    id="config"):    yield ConfigTab()
         yield Footer()
 
     def action_switch_tab(self, tab_id: str) -> None:
@@ -945,10 +1370,14 @@ class DevPanel(App):
 
     def action_refresh_all(self) -> None:
         refresh_map = {
-            HUDTab: "refresh_hud", ReposTab: "refresh_repos",
-            ThermalTab: "refresh_thermal", MemoryTab: "refresh_mem",
-            BootTab: "refresh_boot", WorkspaceTab: "refresh_ws",
-            NetworkTab: "refresh_net", ConfigTab: "refresh_cfg",
+            HUDTab:       "refresh_hud",
+            ReposTab:     "refresh_repos",
+            ThermalTab:   "refresh_thermal",
+            MemoryTab:    "refresh_mem",
+            BootTab:      "refresh_boot",
+            WorkspaceTab: "refresh_ws",
+            NetworkTab:   "refresh_net",
+            ConfigTab:    "refresh_cfg",
         }
         for cls, method in refresh_map.items():
             try:
@@ -956,9 +1385,17 @@ class DevPanel(App):
             except Exception:
                 pass
 
+    def on_unmount(self) -> None:
+        """Clean up serial thread on exit."""
+        try:
+            serial_tab = self.query_one(SerialTab)
+            if serial_tab._reader:
+                serial_tab._reader.stop()
+        except Exception:
+            pass
+
 
 def main():
-    """Entry point for pipx / pip install."""
     DevPanel().run()
 
 
