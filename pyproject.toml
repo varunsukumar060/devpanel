@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "devpanel"
+version = "0.3.0"
+description = "Lightweight terminal TUI dev companion for Linux — system stats, git monitor, thermal manager, memory inspector, boot optimizer & workspace launcher."
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Varun Sukumar K", email = "varunsukumar060@gmail.com" }
+]
+keywords = ["linux", "tui", "terminal", "devtools", "sysinfo", "git", "embedded", "iot"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+    "Topic :: Terminals",
+    "Topic :: Utilities",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "textual>=0.80.0",
+    "psutil>=5.9.0",
+]
+
+[project.scripts]
+devpanel = "devpanel:main"
+
+[project.urls]
+Homepage   = "https://github.com/varunsukumar060/devpanel"
+Repository = "https://github.com/varunsukumar060/devpanel"
+BugTracker = "https://github.com/varunsukumar060/devpanel/issues"
+
+[tool.setuptools]
+py-modules = ["devpanel"]

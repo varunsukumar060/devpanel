@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
 devpanel — Lightweight Linux Dev Companion TUI
-Phase 2: config.toml system, auto-generated on first run
+Phase 3: pipx-installable, distro-agnostic
 Author: Varun Sukumar K (@varunsukumar060)
 """
+
+__version__ = "0.3.0"
+__author__  = "Varun Sukumar K"
 
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, TabbedContent, TabPane, Static, Button
@@ -12,11 +15,68 @@ from textual.reactive import reactive
 import psutil
 import subprocess
 import os
+import sys
 import glob
 import shutil
 import platform
 from pathlib import Path
 from datetime import datetime
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DISTRO DETECTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+def detect_distro() -> dict:
+    """
+    Returns distro info dict with keys:
+      name, id, id_like, version, pkg_manager, terminal
+    Works on any Linux distro via /etc/os-release.
+    """
+    info = {"name": "Linux", "id": "", "id_like": "", "version": "",
+            "pkg_manager": "unknown", "terminal": "xterm"}
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("NAME="):
+                    info["name"] = line.split("=", 1)[1].strip('"')
+                elif line.startswith("ID="):
+                    info["id"] = line.split("=", 1)[1].strip('"').lower()
+                elif line.startswith("ID_LIKE="):
+                    info["id_like"] = line.split("=", 1)[1].strip('"').lower()
+                elif line.startswith("VERSION_ID="):
+                    info["version"] = line.split("=", 1)[1].strip('"')
+    except Exception:
+        pass
+
+    # Package manager detection
+    family = info["id"] + " " + info["id_like"]
+    if any(x in family for x in ["ubuntu", "debian", "mint", "pop", "elementary", "kali", "linuxmint"]):
+        info["pkg_manager"] = "apt"
+    elif any(x in family for x in ["arch", "manjaro", "endeavour", "garuda"]):
+        info["pkg_manager"] = "pacman"
+    elif any(x in family for x in ["fedora", "rhel", "centos", "rocky", "alma"]):
+        info["pkg_manager"] = "dnf"
+    elif any(x in family for x in ["opensuse", "suse"]):
+        info["pkg_manager"] = "zypper"
+    elif shutil.which("apt"):
+        info["pkg_manager"] = "apt"
+    elif shutil.which("pacman"):
+        info["pkg_manager"] = "pacman"
+    elif shutil.which("dnf"):
+        info["pkg_manager"] = "dnf"
+
+    # Terminal emulator preference
+    for t in ["xfce4-terminal", "gnome-terminal", "konsole", "xterm", "kitty", "alacritty", "tilix"]:
+        if shutil.which(t):
+            info["terminal"] = t
+            break
+
+    return info
+
+
+DISTRO = detect_distro()
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONFIG SYSTEM
@@ -26,32 +86,23 @@ CONFIG_DIR  = Path.home() / ".devpanel"
 CONFIG_FILE = CONFIG_DIR / "config.toml"
 
 DEFAULT_CONFIG = """\
-# devpanel configuration file
-# Location: ~/.devpanel/config.toml
-# Edit freely — devpanel reads this on every launch.
+# devpanel configuration — ~/.devpanel/config.toml
+# Docs: https://github.com/varunsukumar060/devpanel
 
 [general]
-# App title shown in the header
-title = "devpanel — Linux Dev Companion"
-# How often the HUD refreshes (seconds)
-hud_refresh = 3
-# How often the Repos tab rescans (seconds)
+title         = "devpanel — Linux Dev Companion"
+hud_refresh   = 3
 repos_refresh = 10
-# How often Memory/Thermal refresh (seconds)
 stats_refresh = 4
 
 [paths]
-# Your primary projects directory
-projects_dir = "{projects_dir}"
-# Additional directories to scan for git repos (comma-separated in the list)
+projects_dir    = "{projects_dir}"
 extra_scan_dirs = [
     "~/Documents",
     "~/Desktop",
 ]
 
 [workspace]
-# USB device profiles: "vendor_id:product_id" = ["label", "cmd1", "cmd2"]
-# Find your device IDs by running: lsusb
 [workspace.profiles]
 "10c4:ea60" = ["ESP32 (CP2102)",  "code",  "python3 -m serial.tools.miniterm"]
 "1a86:7523" = ["Arduino (CH340)", "arduino-ide"]
@@ -60,79 +111,34 @@ extra_scan_dirs = [
 "2341:0010" = ["Arduino Mega",    "arduino-ide"]
 
 [thermal]
-# Temperature thresholds (Celsius) for colour coding
-warn_temp  = 60
-crit_temp  = 80
+warn_temp = 60
+crit_temp = 80
 """
 
 
 def _detect_projects_dir() -> str:
-    """Best-guess projects directory for the current user."""
-    candidates = [
-        Path.home() / "Project",
-        Path.home() / "Projects",
-        Path.home() / "projects",
-        Path.home() / "dev",
-        Path.home() / "code",
-        Path.home() / "workspace",
-        Path.home() / "Documents" / "Projects",
-    ]
-    for c in candidates:
-        if c.exists():
-            return str(c)
-    return str(Path.home() / "Projects")   # fallback — will be created on first use
+    for candidate in ["Project", "Projects", "projects", "dev", "code", "workspace",
+                      "Documents/Projects", "Documents/projects"]:
+        p = Path.home() / candidate
+        if p.exists():
+            return str(p)
+    return str(Path.home() / "Projects")
 
 
 def ensure_config() -> None:
-    """Create ~/.devpanel/config.toml if it doesn't exist yet."""
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     if not CONFIG_FILE.exists():
-        projects = _detect_projects_dir()
-        CONFIG_FILE.write_text(DEFAULT_CONFIG.format(projects_dir=projects))
-        print(f"\n✔  Created default config: {CONFIG_FILE}")
-        print(    "    Edit it to customise paths, USB profiles, and thresholds.\n")
-
-
-def load_config() -> dict:
-    """
-    Parse config.toml with the stdlib only (no tomllib dependency on Py<3.11).
-    Returns a plain dict mirroring the TOML structure.
-    """
-    ensure_config()
-    try:
-        # Python 3.11+ ships tomllib in stdlib
-        import tomllib
-        with open(CONFIG_FILE, "rb") as f:
-            return tomllib.load(f)
-    except ImportError:
-        pass
-    try:
-        # Popular third-party fallback
-        import tomli
-        with open(CONFIG_FILE, "rb") as f:
-            return tomli.load(f)
-    except ImportError:
-        pass
-    # Minimal hand-rolled TOML parser (handles the subset we need)
-    return _parse_toml_simple(CONFIG_FILE.read_text())
+        CONFIG_FILE.write_text(DEFAULT_CONFIG.format(projects_dir=_detect_projects_dir()))
 
 
 def _parse_toml_simple(text: str) -> dict:
-    """
-    Minimal TOML parser for the devpanel config subset:
-      - [section] / [section.sub] headers
-      - key = "string"  /  key = integer  /  key = ["list", ...]
-    Enough for our config; not a full TOML implementation.
-    """
     import re
     result: dict = {}
-    section: list[str] = []
-
+    section: list = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
-        # Section header
         m = re.match(r'^\[([\w.]+)\]$', line)
         if m:
             section = m.group(1).split(".")
@@ -140,38 +146,45 @@ def _parse_toml_simple(text: str) -> dict:
             for part in section:
                 node = node.setdefault(part, {})
             continue
-        # Key = value
         if "=" not in line:
             continue
         key, _, val = line.partition("=")
-        key = key.strip()
-        val = val.strip()
-        # Inline array
+        key, val = key.strip(), val.strip()
         if val.startswith("["):
-            items = re.findall(r'"([^"]+)"', val)
-            parsed: object = items
-        # Quoted string
+            parsed: object = re.findall(r'"([^"]+)"', val)
         elif val.startswith('"'):
             parsed = val.strip('"')
-        # Integer
         elif re.match(r'^-?\d+$', val):
             parsed = int(val)
-        # Boolean
         elif val in ("true", "false"):
             parsed = val == "true"
         else:
             parsed = val
-        # Navigate to current section and set key
         node = result
         for part in section:
             node = node.setdefault(part, {})
         node[key] = parsed
-
     return result
 
 
+def load_config() -> dict:
+    ensure_config()
+    try:
+        import tomllib
+        with open(CONFIG_FILE, "rb") as f:
+            return tomllib.load(f)
+    except ImportError:
+        pass
+    try:
+        import tomli
+        with open(CONFIG_FILE, "rb") as f:
+            return tomli.load(f)
+    except ImportError:
+        pass
+    return _parse_toml_simple(CONFIG_FILE.read_text())
+
+
 def cfg_get(cfg: dict, *keys, default=None):
-    """Safe nested key access: cfg_get(cfg, 'paths', 'projects_dir')."""
     node = cfg
     for k in keys:
         if not isinstance(node, dict):
@@ -182,32 +195,24 @@ def cfg_get(cfg: dict, *keys, default=None):
     return node
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# LOAD CONFIG (at import time — fast, cached for the session)
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ─── Load config (cached for session) ─────────────────────────────────────────────
 CFG = load_config()
 
-# Resolved values from config
-PROJECTS_DIR = Path(os.path.expanduser(cfg_get(CFG, "paths", "projects_dir", default=str(Path.home() / "Projects"))))
-_extra_raw   = cfg_get(CFG, "paths", "extra_scan_dirs", default=["~/Documents", "~/Desktop"])
-DEV_DIRS     = [PROJECTS_DIR] + [Path(os.path.expanduser(p)) for p in _extra_raw]
-
-HUD_REFRESH    = int(cfg_get(CFG, "general", "hud_refresh",    default=3))
-REPOS_REFRESH  = int(cfg_get(CFG, "general", "repos_refresh",  default=10))
-STATS_REFRESH  = int(cfg_get(CFG, "general", "stats_refresh",  default=4))
-APP_TITLE      = cfg_get(CFG, "general", "title", default="devpanel — Linux Dev Companion")
-
-WARN_TEMP = int(cfg_get(CFG, "thermal", "warn_temp", default=60))
-CRIT_TEMP = int(cfg_get(CFG, "thermal", "crit_temp", default=80))
+PROJECTS_DIR  = Path(os.path.expanduser(cfg_get(CFG, "paths", "projects_dir", default=str(Path.home() / "Projects"))))
+_extra_raw    = cfg_get(CFG, "paths", "extra_scan_dirs", default=["~/Documents", "~/Desktop"])
+DEV_DIRS      = [PROJECTS_DIR] + [Path(os.path.expanduser(p)) for p in _extra_raw]
+HUD_REFRESH   = int(cfg_get(CFG, "general", "hud_refresh",    default=3))
+REPOS_REFRESH = int(cfg_get(CFG, "general", "repos_refresh",  default=10))
+STATS_REFRESH = int(cfg_get(CFG, "general", "stats_refresh",  default=4))
+APP_TITLE     = cfg_get(CFG, "general", "title", default="devpanel — Linux Dev Companion")
+WARN_TEMP     = int(cfg_get(CFG, "thermal", "warn_temp", default=60))
+CRIT_TEMP     = int(cfg_get(CFG, "thermal", "crit_temp", default=80))
 
 _profiles_raw = cfg_get(CFG, "workspace", "profiles", default={})
-WORKSPACE_PROFILES: dict[str, tuple[str, list[str]]] = {}
+WORKSPACE_PROFILES: dict = {}
 for vid_pid, items in (_profiles_raw.items() if isinstance(_profiles_raw, dict) else {}.items()):
     if isinstance(items, list) and len(items) >= 1:
         WORKSPACE_PROFILES[vid_pid] = (items[0], items[1:])
-
-# Fallback built-in profiles if config gave nothing
 if not WORKSPACE_PROFILES:
     WORKSPACE_PROFILES = {
         "10c4:ea60": ("ESP32 (CP2102)",  ["code", "python3 -m serial.tools.miniterm"]),
@@ -226,10 +231,9 @@ def run(cmd: str) -> str:
     except Exception:
         return ""
 
-def set_governor_direct(gov: str) -> tuple[bool, str]:
+def set_governor_direct(gov: str) -> tuple:
     cpu_count = psutil.cpu_count(logical=True)
-    ok_count  = 0
-    last_err  = ""
+    ok_count, last_err = 0, ""
     for i in range(cpu_count):
         path = f"/sys/devices/system/cpu/cpu{i}/cpufreq/scaling_governor"
         try:
@@ -243,21 +247,17 @@ def set_governor_direct(gov: str) -> tuple[bool, str]:
         except Exception as e:
             last_err = str(e)
     if ok_count == cpu_count:
-        return True,  f"✔ Governor → [bold]{gov}[/] on all {cpu_count} CPUs"
+        return True, f"✔ Governor → [bold]{gov}[/] on all {cpu_count} CPUs"
     elif ok_count > 0:
-        return True,  f"✔ Governor → [bold]{gov}[/] on {ok_count}/{cpu_count} CPUs"
+        return True, f"✔ Governor → [bold]{gov}[/] on {ok_count}/{cpu_count} CPUs"
     elif last_err == "permission":
-        return False, (
-            f"[yellow]⚠ Permission denied.[/]\n"
-            f"  Relaunch with:  [bold]sudo bash run.sh[/]\n"
-            f"  Or add a passwordless sudoers rule — see README."
-        )
+        return False, "[yellow]⚠ Permission denied — relaunch with: [bold]sudo devpanel[/] or [bold]sudo bash run.sh[/][/]"
     elif last_err == "not_found":
         return False, "[yellow]⚠ cpufreq not available on this CPU[/]"
     else:
         return False, f"[red]✖ {last_err}[/]"
 
-def get_serial_ports() -> list[str]:
+def get_serial_ports() -> list:
     ports = glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*")
     return sorted(ports) if ports else ["None detected"]
 
@@ -270,9 +270,8 @@ def get_git_status(path: Path) -> dict:
     ahead  = run(f"git -C '{path}' rev-list @{{u}}..HEAD --count 2>/dev/null") or "0"
     return {"branch": branch, "dirty": bool(dirty), "last": last, "ahead": int(ahead)}
 
-def get_all_repos() -> list[tuple]:
-    repos = []
-    seen  = set()
+def get_all_repos() -> list:
+    repos, seen = [], set()
     for base in DEV_DIRS:
         if not base.exists():
             continue
@@ -280,15 +279,18 @@ def get_all_repos() -> list[tuple]:
         if st and str(base) not in seen:
             repos.append((base.name, str(base), st))
             seen.add(str(base))
-        for sub in sorted(base.iterdir()):
-            if sub.is_dir() and not sub.name.startswith(".") and str(sub) not in seen:
-                st = get_git_status(sub)
-                if st:
-                    repos.append((sub.name, str(sub), st))
-                    seen.add(str(sub))
+        try:
+            for sub in sorted(base.iterdir()):
+                if sub.is_dir() and not sub.name.startswith(".") and str(sub) not in seen:
+                    st = get_git_status(sub)
+                    if st:
+                        repos.append((sub.name, str(sub), st))
+                        seen.add(str(sub))
+        except PermissionError:
+            pass
     return repos
 
-def get_thermal() -> list[dict]:
+def get_thermal() -> list:
     sensors = []
     try:
         for chip, entries in psutil.sensors_temperatures().items():
@@ -300,7 +302,7 @@ def get_thermal() -> list[dict]:
         pass
     return sensors
 
-def get_fans() -> list[dict]:
+def get_fans() -> list:
     fans = []
     try:
         for chip, entries in psutil.sensors_fans().items():
@@ -310,7 +312,7 @@ def get_fans() -> list[dict]:
         pass
     return fans
 
-def get_top_procs(n: int = 10) -> list[dict]:
+def get_top_procs(n: int = 10) -> list:
     procs = []
     for p in psutil.process_iter(["pid", "name", "memory_percent", "cpu_percent", "status"]):
         try:
@@ -319,18 +321,15 @@ def get_top_procs(n: int = 10) -> list[dict]:
             pass
     return sorted(procs, key=lambda x: x["memory_percent"] or 0, reverse=True)[:n]
 
-def get_usb_devices() -> list[dict]:
+def get_usb_devices() -> list:
     devices = []
-    try:
-        for line in run("lsusb").splitlines():
-            parts = line.split()
-            if len(parts) >= 6:
-                devices.append({"id": parts[5], "name": " ".join(parts[6:])})
-    except Exception:
-        pass
+    for line in run("lsusb").splitlines():
+        parts = line.split()
+        if len(parts) >= 6:
+            devices.append({"id": parts[5], "name": " ".join(parts[6:])})
     return devices
 
-def get_systemd_blame() -> list[dict]:
+def get_systemd_blame() -> list:
     out = run("systemd-analyze blame --no-pager 2>/dev/null | head -20")
     services = []
     for line in out.splitlines():
@@ -347,9 +346,7 @@ def bar(val, max_val, width=20, fill="█", empty="░") -> str:
     return fill * filled + empty * (width - filled)
 
 def temp_color(t: float) -> str:
-    if t < WARN_TEMP:  return "green"
-    if t < CRIT_TEMP:  return "yellow"
-    return "red"
+    return "green" if t < WARN_TEMP else ("yellow" if t < CRIT_TEMP else "red")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -382,20 +379,21 @@ class HUDTab(Static):
              if any(k in s["label"].lower() for k in ["cpu","core","package","tdie","tctl"])),
             None
         )
-        cpu_cls  = "green" if cpu < 60  else ("yellow" if cpu < 85  else "red")
+        cpu_cls  = "green" if cpu < 60 else ("yellow" if cpu < 85 else "red")
         ram_cls  = "green" if ram.percent < 70 else ("yellow" if ram.percent < 90 else "red")
         disk_cls = "green" if disk.percent < 80 else ("yellow" if disk.percent < 90 else "red")
-        temp_str = f"   Temp: [{temp_color(cpu_temp)}]{cpu_temp:.1f}°C[/]" if cpu_temp else ""
-        running_as = "[green]root[/]" if os.geteuid() == 0 else "[dim]user[/]"
-        git_str = ""
+        temp_str = f"  Temp: [{temp_color(cpu_temp)}]{cpu_temp:.1f}°C[/]" if cpu_temp else ""
+        as_str   = "[green]root[/]" if os.geteuid() == 0 else "[dim]user[/]"
+        git_str  = ""
         if git:
-            dirty_tag = " [yellow][dirty][/]" if git["dirty"] else " [green][clean][/]"
-            ahead_tag = f" [cyan]↑{git['ahead']}[/]" if git["ahead"] else ""
-            git_str = f"\n  Branch : [bold]{git['branch']}[/]{dirty_tag}{ahead_tag}\n  Last   : {git['last']}"
+            dirty = " [yellow][dirty][/]" if git["dirty"] else " [green][clean][/]"
+            ahead = f" [cyan]↑{git['ahead']}[/]" if git["ahead"] else ""
+            git_str = f"\n  Branch : [bold]{git['branch']}[/]{dirty}{ahead}\n  Last   : {git['last']}"
 
-        text = (
+        self.query_one("#hud-body", Static).update(
             f"[bold cyan]╔══ SYSTEM HUD ═════════════════════════════════════╗[/]\n"
-            f"[bold cyan]║[/] {datetime.now().strftime('%H:%M:%S')}  Uptime: {uptime}  As: {running_as}  Config: [dim]{CONFIG_FILE}[/]\n"
+            f"[bold cyan]║[/] {datetime.now().strftime('%H:%M:%S')}  Uptime: {uptime}  As: {as_str}  "
+            f"[dim]{DISTRO['name']} {DISTRO['version']} • devpanel v{__version__}[/]\n"
             f"[bold cyan]╚════════════════════════════════════════════════╝[/]\n\n"
             f"[bold]── CPU & Memory ──────────────────────────────[/]\n"
             f"  CPU    : [{cpu_cls}]{cpu:5.1f}%[/]  {bar(cpu,100)}{temp_str}\n"
@@ -404,13 +402,12 @@ class HUDTab(Static):
             f"  Disk / : [{disk_cls}]{disk.percent:5.1f}%[/]  {bar(disk.percent,100)}  {disk.used//1024**3:.1f}GB / {disk.total//1024**3:.1f}GB\n\n"
             f"[bold]── Network ───────────────────────────────────[/]\n"
             f"  WiFi   : [cyan]{wifi}[/]\n"
-            f"  Net ↑   : {net.bytes_sent//1024**2} MB   ↓ {net.bytes_recv//1024**2} MB\n\n"
+            f"  Net ↑   : {net.bytes_sent//1024**2} MB  ↓ {net.bytes_recv//1024**2} MB\n\n"
             f"[bold]── Serial Ports ──────────────────────────────[/]\n"
             f"  Ports  : [yellow]{', '.join(ports)}[/]\n\n"
             f"[bold]── Git (CWD: {cwd.name}) ──────────────────────[/]"
             + (git_str if git_str else "\n  Not a git repo")
         )
-        self.query_one("#hud-body", Static).update(text)
 
 
 class ReposTab(Static):
@@ -422,15 +419,15 @@ class ReposTab(Static):
         self.set_interval(REPOS_REFRESH, self.refresh_repos)
 
     def refresh_repos(self) -> None:
-        repos = get_all_repos()
+        repos   = get_all_repos()
         scanned = ', '.join(str(d) for d in DEV_DIRS if d.exists())
-        lines = [
+        lines   = [
             "[bold cyan]╔══ GIT REPO MONITOR ════════════════════════════╗[/]",
             f"[bold cyan]║[/] Scanning: {scanned}",
             "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
         ]
         if not repos:
-            lines.append("[yellow]No git repositories found. Check paths in ~/.devpanel/config.toml[/]")
+            lines.append("[yellow]No git repos found. Check paths in ~/.devpanel/config.toml[/]")
         for name, path, st in repos:
             dirty = "[yellow]✎ dirty[/]" if st["dirty"] else "[green]✔ clean[/]"
             ahead = f" [cyan]↑{st['ahead']} ahead[/]" if st["ahead"] else ""
@@ -448,11 +445,8 @@ class ThermalTab(Static):
         yield Static(id="thermal-status")
         yield Static("\n[bold]── Power Profiles ────────────────────────────[/]")
         yield Static(id="profile-info")
-        yield Static(
-            "  [dim]Thresholds from config: "
-            f"warn={WARN_TEMP}°C  crit={CRIT_TEMP}°C  —  edit ~/.devpanel/config.toml to change[/]\n"
-            "  [dim]cpufreq buttons need root — relaunch with:  sudo bash run.sh[/]"
-        )
+        yield Static(f"  [dim]Thresholds: warn={WARN_TEMP}°C  crit={CRIT_TEMP}°C  (edit ~/.devpanel/config.toml)[/]\n"
+                     "  [dim]cpufreq needs root — run: sudo devpanel  or  sudo bash run.sh[/]")
         yield Button("⚡ Performance", id="btn-perf",  variant="warning")
         yield Button("⚖  Balanced",    id="btn-bal",   variant="primary")
         yield Button("🔋 Power Save",   id="btn-save",  variant="success")
@@ -464,17 +458,19 @@ class ThermalTab(Static):
     def refresh_thermal(self) -> None:
         sensors = get_thermal()
         fans    = get_fans()
-        lines   = [
+        gov     = run("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null") or "unknown"
+        freq    = run("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null")
+        avail   = run("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null") or "N/A"
+        freq_mhz = f"{int(freq)//1000} MHz" if freq else "unknown"
+        lines = [
             "[bold cyan]╔══ THERMAL MONITOR ═════════════════════════════╗[/]",
             "[bold cyan]╚════════════════════════════════════════════════╝[/]", ""
         ]
         if sensors:
             lines.append("[bold]── Temperature Sensors ───────────────────────[/]")
             for s in sensors:
-                t   = s["current"]
-                col = temp_color(t)
-                b   = bar(t, s["critical"] or CRIT_TEMP, width=16)
-                lines.append(f"  {s['label']:<22} [{col}]{t:5.1f}°C[/]  {b}  (crit: {s['critical']}°C)")
+                t = s["current"]
+                lines.append(f"  {s['label']:<22} [{temp_color(t)}]{t:5.1f}°C[/]  {bar(t, s['critical'] or CRIT_TEMP, 16)}  (crit:{s['critical']}°C)")
         else:
             lines.append("  [dim]No temperature sensors found.[/]")
         if fans:
@@ -483,18 +479,14 @@ class ThermalTab(Static):
                 lines.append(f"  {f['label']:<22} {f['rpm']} RPM")
         else:
             lines.append("\n  [dim]No fan sensors reported.[/]")
-        gov   = run("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null") or "unknown"
-        freq  = run("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq 2>/dev/null")
-        avail = run("cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_governors 2>/dev/null") or "N/A"
-        freq_mhz = f"{int(freq)//1000} MHz" if freq else "unknown"
         lines += [
             "\n[bold]── CPU Frequency ─────────────────────────────[/]",
             f"  Governor  : [cyan]{gov}[/]",
             f"  Cur Freq  : [cyan]{freq_mhz}[/]",
             f"  Available : [dim]{avail}[/]",
         ]
-        self.query_one("#thermal-body",  Static).update("\n".join(lines))
-        self.query_one("#profile-info",  Static).update(f"  Active: [bold cyan]{gov}[/]")
+        self.query_one("#thermal-body", Static).update("\n".join(lines))
+        self.query_one("#profile-info", Static).update(f"  Active: [bold cyan]{gov}[/]")
 
     def _set_governor(self, gov: str) -> None:
         sw = self.query_one("#thermal-status", Static)
@@ -519,14 +511,11 @@ class MemoryTab(Static):
         self.set_interval(STATS_REFRESH, self.refresh_mem)
 
     def refresh_mem(self) -> None:
-        ram   = psutil.virtual_memory()
-        swap  = psutil.swap_memory()
+        ram, swap = psutil.virtual_memory(), psutil.swap_memory()
         procs = get_top_procs(10)
         lines = [
             "[bold cyan]╔══ MEMORY INSPECTOR ════════════════════════════╗[/]",
-            "[bold cyan]╚════════════════════════════════════════════════╝[/]", ""
-        ]
-        lines += [
+            "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
             "[bold]── RAM Overview ──────────────────────────────[/]",
             f"  Total  : {ram.total//1024**2} MB",
             f"  Used   : {ram.used//1024**2} MB  ({ram.percent}%)  {bar(ram.percent,100,18)}",
@@ -569,21 +558,17 @@ class BootTab(Static):
         self.refresh_boot()
 
     def refresh_boot(self) -> None:
-        boot_time = get_boot_time()
-        services  = get_systemd_blame()
+        services = get_systemd_blame()
         lines = [
             "[bold cyan]╔══ BOOT OPTIMIZER ══════════════════════════════╗[/]",
-            "[bold cyan]╚════════════════════════════════════════════════╝[/]", ""
-        ]
-        lines += [
+            "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
             "[bold]── Boot Summary ──────────────────────────────[/]",
-            f"  {boot_time}\n",
+            f"  {get_boot_time()}\n",
         ]
         if services:
             lines += [
                 "[bold]── Slowest Services ────────────────────────────────[/]",
-                f"  {'Time':<14} Service",
-                "  " + "─" * 46,
+                f"  {'Time':<14} Service", "  " + "─" * 46,
             ]
             for s in services[:15]:
                 try:
@@ -593,13 +578,11 @@ class BootTab(Static):
                     col = "white"
                 lines.append(f"  [{col}]{s['time']:<14}[/] {s['service']}")
         else:
-            lines.append("  [dim]systemd-analyze not available or run as root for more detail.[/]")
+            lines.append("  [dim]systemd-analyze not available. Try: sudo devpanel[/]")
         lines += [
             "\n[bold]── Quick Actions ─────────────────────────────[/]",
-            "  Disable a slow service :",
-            "  [cyan]sudo systemctl disable <service>[/]",
-            "  Mask completely        :",
-            "  [cyan]sudo systemctl mask <service>[/]",
+            "  [cyan]sudo systemctl disable <service>[/]   ← disable slow service",
+            "  [cyan]sudo systemctl mask <service>[/]      ← mask completely",
         ]
         self.query_one("#boot-body", Static).update("\n".join(lines))
 
@@ -607,49 +590,45 @@ class BootTab(Static):
 class WorkspaceTab(Static):
     def compose(self) -> ComposeResult:
         yield Static(id="ws-body")
-        yield Button("🔄 Refresh Devices", id="btn-refresh-ws", variant="primary")
+        yield Button("🔄 Refresh", id="btn-refresh-ws", variant="primary")
 
     def on_mount(self) -> None:
         self.refresh_ws()
 
     def refresh_ws(self) -> None:
-        devices = get_usb_devices()
-        ports   = get_serial_ports()
+        devices, ports = get_usb_devices(), get_serial_ports()
         lines = [
             "[bold cyan]╔══ WORKSPACE LAUNCHER ══════════════════════════╗[/]",
-            "[bold cyan]╚════════════════════════════════════════════════╝[/]", ""
+            "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
+            "[bold]── USB Devices ────────────────────────────────[/]",
         ]
-        lines.append("[bold]── Connected USB Devices ─────────────────────[/]")
-        for d in (devices or [{"id": "none", "name": "[dim]No USB devices found[/]"}]):
+        for d in (devices or [{"id": "-", "name": "[dim]None detected[/]"}]):
             matched = WORKSPACE_PROFILES.get(d["id"])
             tag = f"  [green]→ {matched[0]}[/]" if matched else ""
             lines.append(f"  [cyan]{d['id']}[/]  {d['name']}{tag}")
         lines.append("\n[bold]── Serial Ports ──────────────────────────────[/]")
         for p in ports:
             lines.append(f"  [yellow]{p}[/]")
-        lines.append("\n[bold]── Matched Workspace Profiles ────────────────[/]")
+        lines.append("\n[bold]── Matched Profiles ────────────────────────────────[/]")
         matched_any = False
         for d in devices:
             profile = WORKSPACE_PROFILES.get(d["id"])
             if profile:
                 matched_any = True
                 label, cmds = profile
-                lines.append(f"  [bold green]✔ {label}[/] detected")
+                lines.append(f"  [bold green]✔ {label}[/]")
                 for cmd in cmds:
                     lines.append(f"    [cyan]$ {cmd}[/]")
         if not matched_any:
-            lines.append("  [dim]No known dev boards detected. Plug in your ESP32 or Arduino.[/]")
-            lines.append(f"  [dim]Add custom profiles in: {CONFIG_FILE}[/]")
-        lines.append("\n[bold]── Project Quick-Access ──────────────────────[/]")
+            lines.append(f"  [dim]No known boards detected. Add profiles in {CONFIG_FILE}[/]")
+        lines.append("\n[bold]── Projects ────────────────────────────────────────[/]")
         if PROJECTS_DIR.exists():
-            subdirs = sorted(d for d in PROJECTS_DIR.iterdir() if d.is_dir() and not d.name.startswith("."))
-            for d in subdirs[:12]:
+            for d in sorted(d for d in PROJECTS_DIR.iterdir() if d.is_dir() and not d.name.startswith("."))[:12]:
                 git = get_git_status(d)
                 tag = f" [dim](git:{git['branch']})[/]" if git else ""
                 lines.append(f"  [cyan]{d.name}[/]{tag}  →  {d}")
         else:
-            lines.append(f"  [yellow]Projects dir not found: {PROJECTS_DIR}[/]")
-            lines.append(f"  [dim]Edit projects_dir in {CONFIG_FILE}[/]")
+            lines.append(f"  [yellow]Not found: {PROJECTS_DIR}  — edit {CONFIG_FILE}[/]")
         self.query_one("#ws-body", Static).update("\n".join(lines))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -658,11 +637,10 @@ class WorkspaceTab(Static):
 
 
 class ConfigTab(Static):
-    """Live view of the current config file."""
     def compose(self) -> ComposeResult:
         yield Static(id="cfg-body")
-        yield Button("📂 Open in Editor  (nano)", id="btn-edit", variant="primary")
-        yield Button("🔄 Reload Config",            id="btn-reload", variant="success")
+        yield Button("📂 Open in Editor (nano)", id="btn-edit",   variant="primary")
+        yield Button("🔄 Reload Config",         id="btn-reload", variant="success")
 
     def on_mount(self) -> None:
         self.refresh_cfg()
@@ -671,37 +649,38 @@ class ConfigTab(Static):
         try:
             content = CONFIG_FILE.read_text()
         except Exception:
-            content = "[red]Config file not found.[/]"
+            content = ""
         lines = [
-            "[bold cyan]╔══ CONFIG VIEWER ═══════════════════════════════╗[/]",
-            f"[bold cyan]║[/] {CONFIG_FILE}",
+            "[bold cyan]╔══ CONFIG VIEWER ══════════════════════════════╗[/]",
+            f"[bold cyan]║[/] {CONFIG_FILE}  •  distro: {DISTRO['name']}  pkg: {DISTRO['pkg_manager']}",
             "[bold cyan]╚════════════════════════════════════════════════╝[/]", "",
         ]
         for line in content.splitlines():
-            if line.startswith("#"):
-                lines.append(f"[dim]{line}[/]")
-            elif line.startswith("["):
-                lines.append(f"[bold yellow]{line}[/]")
+            if line.startswith("#"):     lines.append(f"[dim]{line}[/]")
+            elif line.startswith("["): lines.append(f"[bold yellow]{line}[/]")
             elif "=" in line:
                 k, _, v = line.partition("=")
-                lines.append(f"  [cyan]{k.rstrip()}[/] = [green]{v.lstrip()}[/]")
-            else:
-                lines.append(line)
+                lines.append(f"  [cyan]{k.rstrip()}[/] =[green]{v}[/]")
+            else:                         lines.append(line)
         self.query_one("#cfg-body", Static).update("\n".join(lines))
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-edit":
-            # Open nano in a new terminal window (doesn’t conflict with TUI)
-            term = shutil.which("xterm") or shutil.which("xfce4-terminal") or shutil.which("gnome-terminal")
-            if term:
-                subprocess.Popen([term, "-e", f"nano {CONFIG_FILE}"])
+            term = DISTRO["terminal"]
+            if term and shutil.which(term):
+                if term in ("xfce4-terminal", "gnome-terminal", "tilix"):
+                    subprocess.Popen([term, "--", "nano", str(CONFIG_FILE)])
+                elif term == "konsole":
+                    subprocess.Popen([term, "-e", "nano", str(CONFIG_FILE)])
+                else:
+                    subprocess.Popen([term, "-e", f"nano {CONFIG_FILE}"])
             else:
                 self.query_one("#cfg-body", Static).update(
-                    f"[yellow]No terminal emulator found.\nEdit manually:\n  nano {CONFIG_FILE}[/]"
+                    f"[yellow]Open manually:\n  nano {CONFIG_FILE}[/]"
                 )
         elif event.button.id == "btn-reload":
             self.query_one("#cfg-body", Static).update(
-                "[green]✔ Config reloaded! Restart devpanel to apply all changes.[/]"
+                "[green]✔ Restart devpanel to apply config changes.[/]"
             )
             self.set_timer(2, self.refresh_cfg)
 
@@ -747,13 +726,9 @@ class DevPanel(App):
 
     def action_refresh_all(self) -> None:
         refresh_map = {
-            HUDTab:       "refresh_hud",
-            ReposTab:     "refresh_repos",
-            ThermalTab:   "refresh_thermal",
-            MemoryTab:    "refresh_mem",
-            BootTab:      "refresh_boot",
-            WorkspaceTab: "refresh_ws",
-            ConfigTab:    "refresh_cfg",
+            HUDTab: "refresh_hud", ReposTab: "refresh_repos",
+            ThermalTab: "refresh_thermal", MemoryTab: "refresh_mem",
+            BootTab: "refresh_boot", WorkspaceTab: "refresh_ws", ConfigTab: "refresh_cfg",
         }
         for cls, method in refresh_map.items():
             try:
@@ -762,5 +737,10 @@ class DevPanel(App):
                 pass
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for pipx / pip install."""
     DevPanel().run()
+
+
+if __name__ == "__main__":
+    main()
